@@ -1,13 +1,47 @@
+FROM python:3.11-slim AS ffmpeg-downloader
+
+ARG FFMPEG_VERSION=7.1
+ARG FFMPEG_ARCHIVE=ffmpeg-n${FFMPEG_VERSION}-latest-linux64-gpl-${FFMPEG_VERSION}.tar.xz
+ARG FFMPEG_ARCHIVE_DIR=ffmpeg-n${FFMPEG_VERSION}-latest-linux64-gpl-${FFMPEG_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Download the pinned FFmpeg 7.1 build with HDR/AV1/NVENC/VAAPI support
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_ARCHIVE}" -o /tmp/ffmpeg.tar.xz \
+    && mkdir -p /opt \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /opt \
+    && mv /opt/${FFMPEG_ARCHIVE_DIR} /opt/ffmpeg \
+    && rm -f /tmp/ffmpeg.tar.xz
 
 FROM python:3.11-slim
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/ffmpeg/bin:${PATH}"
+
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
+# Runtime dependencies required for audio processing and GPU detection utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     curl \
+    libasound2 \
+    libdrm2 \
+    libsndfile1 \
+    libva2 \
+    libva-drm2 \
+    libva-x11-2 \
+    libvdpau1 \
+    ocl-icd-libopencl1 \
+    vainfo \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ffmpeg-downloader /opt/ffmpeg /opt/ffmpeg
 
 # Copy requirements first for better caching
 COPY requirements.txt .
@@ -23,5 +57,16 @@ RUN mkdir -p /app/logs /app/output /app/temp
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8001
+
+
+# Health check (process-based for non-HTTP worker)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD test -f /proc/1/cmdline || exit 1
+# Run as a non-root user. The hardening ratchet judges the LAST USER directive,
+# and uid/gid 65532 is the PMOVES convention (see services/agent-zero and
+# services/gateway-agent). Ownership is set explicitly rather than with a late
+# recursive chown so the layer stays small.
+RUN groupadd -r pmoves --gid=65532     && useradd -r -g pmoves --uid=65532 --home-dir=/app --shell=/sbin/nologin pmoves     && chown -R 65532:65532 /app
+USER pmoves:pmoves
 
 CMD ["./entrypoint.sh"]
