@@ -6,9 +6,6 @@ networks:
   media-stack:
     driver: bridge
 
-  media-stack:
-    driver: bridge
-
   supabase-network:
     external: true
     name: pmoves-net
@@ -123,20 +120,17 @@ services:
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - NEO4J_URI=bolt://neo4j:7687
-
-    environment:
-      - JELLYFIN_URL=http://jellyfin:8096
-      - JELLYFIN_USERNAME=${JELLYFIN_USERNAME}
-      - JELLYFIN_PASSWORD=${JELLYFIN_PASSWORD}
-      - JELLYFIN_API_KEY=${JELLYFIN_API_KEY}
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
-      - NEO4J_URI=bolt://neo4j:7687
-
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=mediapassword123
       - QWEN_AUDIO_URL=http://qwen-audio:8000
       - PROCESSING_INTERVAL=300  # Process every 5 minutes
+      # This stack names the cache service `redis`; main.py defaults REDIS_HOST
+      # to `jellyfin-redis`, which is the service name in PMOVES.AI's
+      # docker-compose.jellyfin-ai.yml. Set it explicitly here rather than
+      # changing that default: PMOVES supplies no REDIS_HOST and relies on it,
+      # so retargeting the default would fix this stack and silently disable
+      # caching in the PMOVES deployment.
+      - REDIS_HOST=redis
     volumes:
       - ./media:/app/media
       - ./output:/app/output
@@ -200,7 +194,11 @@ services:
       - REACT_APP_JELLYFIN_URL=http://localhost:8096
       - REACT_APP_NEO4J_URL=http://localhost:7474
     ports:
-      - "3001:80"
+      # 8080, not 80: this image is nginxinc/nginx-unprivileged, which cannot
+      # bind the privileged port and listens on 8080 (dashboard/Dockerfile
+      # EXPOSE 8080). Publishing to :80 targeted a port nothing listens on, so
+      # the container came up healthy and the dashboard was unreachable.
+      - "3001:8080"
     networks:
       - media-stack
     restart: unless-stopped

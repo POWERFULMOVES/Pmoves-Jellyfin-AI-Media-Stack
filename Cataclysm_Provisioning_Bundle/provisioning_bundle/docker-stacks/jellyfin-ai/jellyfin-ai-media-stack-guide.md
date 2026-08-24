@@ -143,12 +143,14 @@ The provisioning bundle ships with `scripts/jellyfin_backup.sh`, a helper that w
 **Manual backup**
 
 ```bash
-cd CATACLYSM_STUDIOS_INC/PMOVES-PROVISIONS/docker-stacks/jellyfin-ai
+cd Cataclysm_Provisioning_Bundle/provisioning_bundle/docker-stacks/jellyfin-ai
 scripts/jellyfin_backup.sh backup \
   --stack-root /path/to/docker-stacks/jellyfin-ai \
-  --bundle-dir /path/to/docker-stacks/jellyfin-ai/backups \
-  --upload
+  --bundle-dir /path/to/docker-stacks/jellyfin-ai/backups
 ```
+
+Uploading is the default. The script accepts `--no-upload` to suppress it; there
+is no `--upload` flag, and passing one exits with `Unknown option: --upload`.
 
 * Authenticates with `JELLYFIN_API_KEY` or the username/password pair defined in `.env`.
 * Persists the generated archive under `<stack-root>/backups/` alongside the provisioning bundle.

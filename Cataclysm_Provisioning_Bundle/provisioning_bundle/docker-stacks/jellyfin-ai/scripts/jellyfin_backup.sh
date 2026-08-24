@@ -7,6 +7,13 @@ SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
 STACK_ROOT_DEFAULT=$(cd "${SCRIPT_DIR}/.." && pwd)
 STACK_ROOT=${JELLYFIN_STACK_ROOT:-${STACK_ROOT_DEFAULT}}
+# Capture explicitness BEFORE the defaults below overwrite these names.
+# --stack-root is parsed after this file is sourced, so anything derived from
+# STACK_ROOT here is derived from the OLD root; rederive_stack_paths() fixes
+# that afterwards, but must not clobber a value the operator set on purpose.
+ARCHIVE_DIR_EXPLICIT=${JELLYFIN_ARCHIVE_DIR:+1}
+JELLYFIN_CONFIG_PATH_EXPLICIT=${JELLYFIN_CONFIG_PATH:+1}
+JELLYFIN_CACHE_PATH_EXPLICIT=${JELLYFIN_CACHE_PATH:+1}
 ARCHIVE_DIR_DEFAULT="${STACK_ROOT}/backups"
 ARCHIVE_DIR="${JELLYFIN_ARCHIVE_DIR:-${ARCHIVE_DIR_DEFAULT}}"
 JELLYFIN_URL=${JELLYFIN_URL:-"http://localhost:8096"}
@@ -20,6 +27,24 @@ AUTH_TOKEN=""
 CLIENT_HEADER="MediaBrowser Client=\"pmoves-backup\", Device=\"PMOVES Provisioning\", DeviceId=\"pmoves-provisioning\", Version=\"1.0.0\""
 JELLYFIN_CONFIG_PATH=${JELLYFIN_CONFIG_PATH:-"${STACK_ROOT}/jellyfin/config"}
 JELLYFIN_CACHE_PATH=${JELLYFIN_CACHE_PATH:-"${STACK_ROOT}/jellyfin/cache"}
+
+# Re-derive anything that hangs off STACK_ROOT, after argument parsing.
+#
+# --stack-root is documented as a post-command flag, but ARCHIVE_DIR,
+# JELLYFIN_CONFIG_PATH and JELLYFIN_CACHE_PATH are all computed above from the
+# script's own location. Overriding the root therefore moved STACK_ROOT and
+# nothing else, so backups and restores kept reading and writing under the
+# original tree -- silently, and only for the paths the operator did not also
+# pass by hand.
+#
+# Values set explicitly (env at load, or a --flag during parsing) are left
+# alone; only the implicit ones follow the root.
+rederive_stack_paths() {
+  [[ -z "${ARCHIVE_DIR_EXPLICIT:-}" ]] && ARCHIVE_DIR="${STACK_ROOT}/backups"
+  [[ -z "${JELLYFIN_CONFIG_PATH_EXPLICIT:-}" ]] && JELLYFIN_CONFIG_PATH="${STACK_ROOT}/jellyfin/config"
+  [[ -z "${JELLYFIN_CACHE_PATH_EXPLICIT:-}" ]] && JELLYFIN_CACHE_PATH="${STACK_ROOT}/jellyfin/cache"
+  return 0
+}
 
 log() {
   echo "[jellyfin-backup] $*" >&2
@@ -122,6 +147,26 @@ resolve_host_path() {
       return 0
     fi
   fi
+  echo "$candidate"
+}
+
+resolve_host_dir() {
+  # Directory counterpart of resolve_host_path.
+  #
+  # Jellyfin reports paths as the CONTAINER sees them (/config/..., /cache/...).
+  # Restore derives its target directory from the API and previously used that
+  # value as a host path, so it copied the archive to /config/... ON THE HOST --
+  # or failed on permissions -- instead of into the mapped volume.
+  #
+  # Prefix-map rather than probing with -d: /config can exist on the host for
+  # unrelated reasons, and a successful probe there would be the wrong answer.
+  local candidate="$1"
+  case "$candidate" in
+    /config)   echo "${JELLYFIN_CONFIG_PATH}" ; return 0 ;;
+    /config/*) echo "${JELLYFIN_CONFIG_PATH}/${candidate#/config/}" ; return 0 ;;
+    /cache)    echo "${JELLYFIN_CACHE_PATH}" ; return 0 ;;
+    /cache/*)  echo "${JELLYFIN_CACHE_PATH}/${candidate#/cache/}" ; return 0 ;;
+  esac
   echo "$candidate"
 }
 
@@ -255,6 +300,9 @@ perform_restore() {
   local target_dir=""
   if [[ -n "$existing_list" ]]; then
     target_dir=$(printf '%s' "$existing_list" | ${JQ_BIN} -r '.[0].Path | select(.!=null) | split("/")[:-1] | join("/")')
+    # The API answers with a container path; the fallback below already uses the
+    # host-side JELLYFIN_CONFIG_PATH, so translate to match it.
+    [[ -n "$target_dir" ]] && target_dir=$(resolve_host_dir "$target_dir")
   fi
   if [[ -z "$target_dir" ]]; then
     target_dir="${JELLYFIN_CONFIG_PATH}/data/backups"
@@ -287,15 +335,15 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --bundle-dir)
-      ARCHIVE_DIR="$2"
+      ARCHIVE_DIR="$2"; ARCHIVE_DIR_EXPLICIT=1
       shift 2
       ;;
     --config-dir)
-      JELLYFIN_CONFIG_PATH="$2"
+      JELLYFIN_CONFIG_PATH="$2"; JELLYFIN_CONFIG_PATH_EXPLICIT=1
       shift 2
       ;;
     --cache-dir)
-      JELLYFIN_CACHE_PATH="$2"
+      JELLYFIN_CACHE_PATH="$2"; JELLYFIN_CACHE_PATH_EXPLICIT=1
       shift 2
       ;;
     --supabase-bucket)
@@ -321,6 +369,7 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+rederive_stack_paths
 
 if [[ -z "$COMMAND" ]]; then
   usage
@@ -334,11 +383,11 @@ case "$COMMAND" in
         --stack-root)
           STACK_ROOT="$2"; shift 2 ;;
         --bundle-dir)
-          ARCHIVE_DIR="$2"; shift 2 ;;
+          ARCHIVE_DIR="$2"; ARCHIVE_DIR_EXPLICIT=1; shift 2 ;;
         --config-dir)
-          JELLYFIN_CONFIG_PATH="$2"; shift 2 ;;
+          JELLYFIN_CONFIG_PATH="$2"; JELLYFIN_CONFIG_PATH_EXPLICIT=1; shift 2 ;;
         --cache-dir)
-          JELLYFIN_CACHE_PATH="$2"; shift 2 ;;
+          JELLYFIN_CACHE_PATH="$2"; JELLYFIN_CACHE_PATH_EXPLICIT=1; shift 2 ;;
         --supabase-bucket)
           SUPABASE_BUCKET="$2"; shift 2 ;;
         --supabase-prefix)
@@ -354,6 +403,7 @@ case "$COMMAND" in
           ;;
       esac
     done
+    rederive_stack_paths
     ;;
   restore)
     while [[ $# -gt 0 ]]; do
@@ -363,11 +413,11 @@ case "$COMMAND" in
         --stack-root)
           STACK_ROOT="$2"; shift 2 ;;
         --bundle-dir)
-          ARCHIVE_DIR="$2"; shift 2 ;;
+          ARCHIVE_DIR="$2"; ARCHIVE_DIR_EXPLICIT=1; shift 2 ;;
         --config-dir)
-          JELLYFIN_CONFIG_PATH="$2"; shift 2 ;;
+          JELLYFIN_CONFIG_PATH="$2"; JELLYFIN_CONFIG_PATH_EXPLICIT=1; shift 2 ;;
         --cache-dir)
-          JELLYFIN_CACHE_PATH="$2"; shift 2 ;;
+          JELLYFIN_CACHE_PATH="$2"; JELLYFIN_CACHE_PATH_EXPLICIT=1; shift 2 ;;
         --supabase-bucket)
           SUPABASE_BUCKET="$2"; shift 2 ;;
         --supabase-prefix)
@@ -383,6 +433,7 @@ case "$COMMAND" in
           ;;
       esac
     done
+    rederive_stack_paths
     ;;
 esac
 
