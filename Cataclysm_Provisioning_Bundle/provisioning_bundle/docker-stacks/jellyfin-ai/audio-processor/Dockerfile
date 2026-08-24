@@ -1,8 +1,23 @@
 FROM python:3.11-slim AS ffmpeg-downloader
 
-ARG FFMPEG_VERSION=7.1
-ARG FFMPEG_ARCHIVE=ffmpeg-n${FFMPEG_VERSION}-latest-linux64-gpl-${FFMPEG_VERSION}.tar.xz
-ARG FFMPEG_ARCHIVE_DIR=ffmpeg-n${FFMPEG_VERSION}-latest-linux64-gpl-${FFMPEG_VERSION}
+# 8.1, not 7.1. This downloads from BtbN's ROLLING `latest` release tag, which
+# only carries the versions currently being built -- today master, n8.1 and
+# n9.0. n7.1 has aged out of it, so the pinned 7.1 URL returns 404 on EVERY
+# architecture and this image cannot build at all. Verified: both 8.1 archives
+# return 200, both 7.1 archives return 404.
+#
+# The coupling is the real hazard: a version pin against a rolling tag is not a
+# pin, and this will break again when 8.1 ages out. Either keep this value in
+# the set `latest` still publishes, or switch to a dated autobuild tag for a
+# genuine pin.
+ARG FFMPEG_VERSION=8.1
+# TARGETARCH is supplied by buildx. The archive slug was hardcoded to linux64,
+# which put x86-64 binaries on ARM64 nodes (Jetson, SPARK) -- and because the
+# runtime stage below prepends /opt/ffmpeg/bin to PATH, they did not merely sit
+# unused, they SHADOWED the architecture-native ffmpeg. The slug appears in both
+# the archive name and the extracted directory name, so it has to be resolved
+# before either is formed.
+ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -13,11 +28,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_ARCHIVE}" -o /tmp/ffmpeg.tar.xz \
-    && mkdir -p /opt \
-    && tar -xJf /tmp/ffmpeg.tar.xz -C /opt \
-    && mv /opt/${FFMPEG_ARCHIVE_DIR} /opt/ffmpeg \
-    && rm -f /tmp/ffmpeg.tar.xz
+# Fails closed on an unrecognised architecture rather than falling back to
+# linux64. A silent x86 default is exactly how this reaches an ARM node and
+# only surfaces at the first transcode.
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) FFMPEG_ARCH=linux64 ;; \
+      arm64) FFMPEG_ARCH=linuxarm64 ;; \
+      *) echo "Unsupported TARGETARCH for FFmpeg build: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    FFMPEG_SLUG="ffmpeg-n${FFMPEG_VERSION}-latest-${FFMPEG_ARCH}-gpl-${FFMPEG_VERSION}"; \
+    curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_SLUG}.tar.xz" -o /tmp/ffmpeg.tar.xz; \
+    mkdir -p /opt; \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /opt; \
+    mv "/opt/${FFMPEG_SLUG}" /opt/ffmpeg; \
+    rm -f /tmp/ffmpeg.tar.xz; \
+    # Smoke the binary in the stage that produced it, so a wrong-architecture
+    # download fails the build instead of the first transcode.
+    /opt/ffmpeg/bin/ffmpeg -version | head -1
 
 FROM python:3.11-slim
 
